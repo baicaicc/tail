@@ -152,6 +152,7 @@ func (shared *InotifyTracker) addWatch(winfo *watchInfo) error {
 	var err error
 	// already in inotify watch
 	if shared.watchNums[fname] == 0 {
+		os.Stderr.WriteString("TRACE add "+fname+"\n")
 		err = shared.watcher.Add(fname)
 	}
 	if err == nil {
@@ -176,6 +177,9 @@ func (shared *InotifyTracker) removeWatch(winfo *watchInfo) error {
 		// Watch for new files to be created in the parent directory.
 		fname = filepath.Dir(fname)
 	}
+	if shared.watchNums[fname] <= 0 {
+		os.Stderr.WriteString("TRACE unmatched-remove "+fname+"\n")
+	}
 	shared.watchNums[fname]--
 	watchNum := shared.watchNums[fname]
 	if watchNum == 0 {
@@ -189,6 +193,7 @@ func (shared *InotifyTracker) removeWatch(winfo *watchInfo) error {
 	// synchronously for the kernel to acknowledge the removal of the watch
 	// for this file, which causes us to deadlock if we still held the lock.
 	if watchNum == 0 {
+		os.Stderr.WriteString("TRACE remove "+fname+"\n")
 		err = shared.watcher.Remove(fname)
 	}
 

@@ -1,12 +1,12 @@
 name: ci
-on: [push, pull_request]
+on: [push]
 jobs:
-  test-build:
+  windows-trace:
     strategy:
+      fail-fast: false
       matrix:
-        go-version: [1.21.x, 1.20.x, 1.19.x, 1.18.x]
-        os: [ubuntu-20.04, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+        go-version: [1.21.x, 1.18.x]
+    runs-on: windows-latest
     steps:
     - name: Install Go
       uses: actions/setup-go@v2
@@ -14,12 +14,24 @@ jobs:
         go-version: ${{ matrix.go-version }}
     - name: Checkout code
       uses: actions/checkout@v2
+    - name: Repeat traced root-package tests
+      shell: bash
+      run: |
+        set +e
+        git log -1 --format='HEAD %h %s'
+        grep -c 'TRACE' watch/inotify_tracker.go
+        go test -race -c -o tail.test.exe . || exit 1
+        mkdir -p runs
+        bad=0
+        for i in $(seq 1 10); do
+          ./tail.test.exe -test.v -test.timeout 2m > runs/iter_$i.txt 2>&1; rc=$?
+          [ $rc -ne 0 ] && bad=$((bad+1))
+          echo "iter $i rc=$rc traces=$(grep -c '^TRACE' runs/iter_$i.txt) $(grep -E '^--- FAIL' runs/iter_$i.txt | tr -d '\r' | tr '\n' ' ')"
+        done
+        echo "SUMMARY go=${{ matrix.go-version }} bad=$bad"
+    - name: Upload runs
+      if: always()
+      uses: actions/upload-artifact@v4
       with:
-          fetch-depth: 0
-    - name: Test
-      run: go test -race -v -timeout 2m ./...
-    - name: Build lib
-      run: go build
-    - name: Build cmd
-      run: go build
-      working-directory: ./cmd/gotail
+        name: trace-${{ matrix.go-version }}
+        path: runs/
