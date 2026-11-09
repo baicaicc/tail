@@ -17,15 +17,18 @@ jobs:
     - name: Repeat root-package tests
       shell: bash
       run: |
+        set +e
         git log -1 --format='HEAD %h %s'
-        go test -race -c -o tail.test.exe .
+        go test -race -c -o tail.test.exe . || exit 1
         pass=0; fail=0
-        for i in $(seq 1 10); do
+        for i in $(seq 1 15); do
           ./tail.test.exe -test.v -test.timeout 2m > out_$i.txt 2>&1; rc=$?
           if [ $rc -eq 0 ]; then pass=$((pass+1)); else fail=$((fail+1)); fi
-          echo "iter $i rc=$rc $(grep -E '^--- FAIL' out_$i.txt | tr '\n' ' ') $(grep -A1 '^running tests:' out_$i.txt | tail -1)"
+          echo "iter $i rc=$rc $(grep -E '^--- FAIL' out_$i.txt | tr '\n' ' ') $(grep -A1 '^running tests:' out_$i.txt | tail -1 | tr -d '\t')"
+          if [ $rc -ne 0 ]; then grep -E 'Error in Watcher|_test.go:[0-9]+:' out_$i.txt | head -5 | sed 's/^/    /'; fi
         done
         echo "SUMMARY go=${{ matrix.go-version }} pass=$pass fail=$fail"
     - name: Watch package
       shell: bash
+      if: always()
       run: go test -race -count=20 ./watch
