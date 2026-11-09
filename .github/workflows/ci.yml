@@ -1,12 +1,12 @@
 name: ci
-on: [push, pull_request]
+on: [push]
 jobs:
-  test-build:
+  windows-ab:
     strategy:
+      fail-fast: false
       matrix:
         go-version: [1.21.x, 1.20.x, 1.19.x, 1.18.x]
-        os: [ubuntu-20.04, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
     steps:
     - name: Install Go
       uses: actions/setup-go@v2
@@ -14,12 +14,39 @@ jobs:
         go-version: ${{ matrix.go-version }}
     - name: Checkout code
       uses: actions/checkout@v2
+    - name: Repeat root-package tests
+      shell: bash
+      run: |
+        set +e
+        git log -1 --format='HEAD %h %s'
+        go test -race -c -o tail.test.exe . || exit 1
+        mkdir -p failed
+        pass=0; fast=0; hang=0
+        for i in $(seq 1 40); do
+          t0=$(date +%s)
+          ./tail.test.exe -test.v -test.timeout 2m > out.txt 2>&1; rc=$?
+          dt=$(( $(date +%s) - t0 ))
+          ci=$(grep -c 'CancelIo: The handle is invalid' out.txt)
+          if [ $rc -eq 0 ]; then pass=$((pass+1)); r=pass
+          elif grep -q '^panic: test timed out' out.txt; then hang=$((hang+1)); r="hang in $(grep -A1 '^running tests:' out.txt | tail -1 | tr -d '\t\r')"
+          else fast=$((fast+1)); r="fail $(grep -E '^--- FAIL' out.txt | tr -d '\r' | tr '\n' ' ')"; fi
+          echo "iter $i rc=$rc ${dt}s cancelio=$ci $r"
+          if [ $rc -ne 0 ]; then
+            cp out.txt failed/iter_$i.txt
+            grep -E '_test\.go:[0-9]+:|^--- FAIL' out.txt | head -6 | sed 's/^/    /'
+            grep -A2 '^panic:' out.txt | grep -v 'test timed out' | head -3 | sed 's/^/    /'
+          fi
+        done
+        echo "SUMMARY go=${{ matrix.go-version }} pass=$pass fast_fail=$fast hang=$hang"
+        [ $((fast+hang)) -eq 0 ]
+    - name: Upload failed runs
+      if: always()
+      uses: actions/upload-artifact@v4
       with:
-          fetch-depth: 0
-    - name: Test
-      run: go test -race -v -timeout 2m ./...
-    - name: Build lib
-      run: go build
-    - name: Build cmd
-      run: go build
-      working-directory: ./cmd/gotail
+        name: failed-${{ matrix.go-version }}
+        path: failed/
+        if-no-files-found: ignore
+    - name: Watch package
+      if: always()
+      shell: bash
+      run: go test -race -count=20 ./watch
