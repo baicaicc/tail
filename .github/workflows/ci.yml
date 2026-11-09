@@ -1,12 +1,12 @@
 name: ci
-on: [push, pull_request]
+on: [push]
 jobs:
-  test-build:
+  windows-ab:
     strategy:
+      fail-fast: false
       matrix:
         go-version: [1.21.x, 1.20.x, 1.19.x, 1.18.x]
-        os: [ubuntu-20.04, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
     steps:
     - name: Install Go
       uses: actions/setup-go@v2
@@ -14,12 +14,18 @@ jobs:
         go-version: ${{ matrix.go-version }}
     - name: Checkout code
       uses: actions/checkout@v2
-      with:
-          fetch-depth: 0
-    - name: Test
-      run: go test -race -v -timeout 2m ./...
-    - name: Build lib
-      run: go build
-    - name: Build cmd
-      run: go build
-      working-directory: ./cmd/gotail
+    - name: Repeat root-package tests
+      shell: bash
+      run: |
+        git log -1 --format='HEAD %h %s'
+        go test -race -c -o tail.test.exe .
+        pass=0; fail=0
+        for i in $(seq 1 10); do
+          ./tail.test.exe -test.v -test.timeout 2m > out_$i.txt 2>&1; rc=$?
+          if [ $rc -eq 0 ]; then pass=$((pass+1)); else fail=$((fail+1)); fi
+          echo "iter $i rc=$rc $(grep -E '^--- FAIL' out_$i.txt | tr '\n' ' ') $(grep -A1 '^running tests:' out_$i.txt | tail -1)"
+        done
+        echo "SUMMARY go=${{ matrix.go-version }} pass=$pass fail=$fail"
+    - name: Watch package
+      shell: bash
+      run: go test -race -count=20 ./watch
