@@ -1,12 +1,13 @@
 name: ci
-on: [push, pull_request]
+on: [push]
 jobs:
-  test-build:
+  windows-std:
     strategy:
+      fail-fast: false
       matrix:
         go-version: [1.21.x, 1.20.x, 1.19.x, 1.18.x]
-        os: [ubuntu-20.04, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
+    timeout-minutes: 300
     steps:
     - name: Install Go
       uses: actions/setup-go@v2
@@ -16,10 +17,30 @@ jobs:
       uses: actions/checkout@v2
       with:
           fetch-depth: 0
-    - name: Test
-      run: go test -race -v -timeout 2m ./...
-    - name: Build lib
-      run: go build
-    - name: Build cmd
-      run: go build
-      working-directory: ./cmd/gotail
+    - name: Repeat the CI test command with a cold build cache
+      shell: bash
+      run: |
+        set +e
+        git log -1 --format='HEAD %h %s'
+        mkdir -p failed
+        pass=0; fail=0
+        for i in $(seq 1 15); do
+          go clean -cache
+          t0=$(date +%s)
+          go test -race -v -timeout 2m ./... > out.txt 2>&1; rc=$?
+          dt=$(( $(date +%s) - t0 ))
+          if [ $rc -eq 0 ]; then pass=$((pass+1)); r=pass; else
+            fail=$((fail+1)); cp out.txt failed/iter_$i.txt
+            r="$(grep -E '^(FAIL|ok) ' out.txt | tr -d '\r' | tr '\n' ' ') | timeout=$(grep -c '^panic: test timed out' out.txt) last_run=$(grep -B200 '^panic: test timed out' out.txt | grep '^=== RUN' | tail -1 | awk '{print $3}') running=$(grep -A1 '^running tests:' out.txt | tail -1 | tr -d '\t\r') failed_tests=$(grep -E '^--- FAIL' out.txt | awk '{print $3}' | tr '\n' ' ')"
+          fi
+          echo "iter $i rc=$rc ${dt}s cancelio=$(grep -c 'CancelIo: The handle is invalid' out.txt) $r"
+        done
+        echo "SUMMARY go=${{ matrix.go-version }} pass=$pass fail=$fail"
+        [ $fail -eq 0 ]
+    - name: Upload failed runs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: failed-${{ matrix.go-version }}
+        path: failed/
+        if-no-files-found: ignore
