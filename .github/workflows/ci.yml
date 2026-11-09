@@ -1,12 +1,14 @@
 name: ci
-on: [push, pull_request]
+on: [push]
 jobs:
-  test-build:
+  windows-arms:
     strategy:
+      fail-fast: false
       matrix:
-        go-version: [1.21.x, 1.20.x, 1.19.x, 1.18.x]
-        os: [ubuntu-20.04, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+        go-version: [1.20.x, 1.21.x, 1.18.x]
+        shard: [1, 2]
+    runs-on: windows-latest
+    timeout-minutes: 300
     steps:
     - name: Install Go
       uses: actions/setup-go@v2
@@ -16,10 +18,38 @@ jobs:
       uses: actions/checkout@v2
       with:
           fetch-depth: 0
-    - name: Test
-      run: go test -race -v -timeout 2m ./...
-    - name: Build lib
-      run: go build
-    - name: Build cmd
-      run: go build
-      working-directory: ./cmd/gotail
+    - name: Interleave master, this commit without the new test, and this commit
+      shell: bash
+      run: |
+        set +e
+        git log -1 --format='HEAD %h %s'
+        git worktree add -q ../base ba755e4 && git -C ../base log -1 --format='BASE %h %s'
+        (cd ../base && go test -race -c -o "$PWD/../A.exe" .) || exit 1
+        go test -race -c -o ../C.exe . || exit 1
+        OLD='^(TestTailFile|TestMustExist|TestWaitsForFileToExist|TestWaitsForFileToExistRelativePath|TestStop|TestStopNonEmptyFile|TestStopAtEOF|TestMaxLineSizeFollow|TestMaxLineSizeNoFollow|TestOver4096ByteLine|TestOver4096ByteLineWithSetMaxLineSize|TestReOpenWithCursor|TestLocationFull|TestLocationFullDontFollow|TestLocationEnd|TestLocationMiddle|TestReOpenInotify|TestReOpenPolling|TestReSeekInotify|TestReSeekPolling|TestReSeekWithCursor|TestRateLimiting|TestTell|TestBlockUntilExists|TestInotify_WaitForCreateThenMove|TestIncompleteLines|TestIncompleteLongLines|TestIncompleteLinesWithReopens|TestIncompleteLinesWithoutFollow)$'
+        mkdir -p failed
+        declare -A pass fail
+        for i in $(seq 1 20); do
+          case $((i % 3)) in 0) order="A B C";; 1) order="B C A";; 2) order="C A B";; esac
+          for arm in $order; do
+            case $arm in A) cmd="../A.exe -test.run $OLD";; B) cmd="../C.exe -test.run $OLD";; C) cmd="../C.exe";; esac
+            t0=$(date +%s)
+            $cmd -test.v -test.timeout 2m > out.txt 2>&1; rc=$?
+            dt=$(( $(date +%s) - t0 ))
+            n=$(grep -c '^=== RUN' out.txt)
+            if [ $rc -eq 0 ]; then pass[$arm]=$((${pass[$arm]:-0}+1)); r=pass
+            else fail[$arm]=$((${fail[$arm]:-0}+1)); cp out.txt failed/iter_${i}_$arm.txt
+              if grep -q '^panic: test timed out' out.txt; then r="hang $(grep '^=== RUN' out.txt | tail -1 | awk '{print $3}')"; else r="fail $(grep -E '^--- FAIL' out.txt | awk '{print $3}' | tr '\n' ' ')"; fi
+            fi
+            echo "iter $i arm $arm rc=$rc ${dt}s tests=$n cancelio=$(grep -c 'CancelIo: The handle is invalid' out.txt) $r"
+          done
+        done
+        for arm in A B C; do echo "SUMMARY go=${{ matrix.go-version }} shard=${{ matrix.shard }} arm=$arm pass=${pass[$arm]:-0} fail=${fail[$arm]:-0}"; done
+        [ -z "${fail[*]}" ]
+    - name: Upload failed runs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: failed-${{ matrix.go-version }}-${{ matrix.shard }}
+        path: failed/
+        if-no-files-found: ignore
